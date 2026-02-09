@@ -1,0 +1,543 @@
+---
+title: "Submission"
+output: html_document
+date: "2026-01-29"
+---
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(brms)
+
+# Parallel settings (important)
+options(mc.cores = parallel::detectCores())
+
+```
+
+```{r}
+train <- read.csv("kc_house_data.csv")
+
+```
+
+```{r}
+train <- train %>%
+  mutate(
+    date = as.Date(substr(date, 1, 8), format = "%Y%m%d"),
+    zipcode = as.factor(zipcode),
+    log_price = log(price)
+  )
+```
+
+```{r}
+train <- train %>%
+  mutate(
+    log_sqft_above = log(sqft_above + 1),
+    log_sqft_basement = log(sqft_basement + 1)
+  )
+```
+
+```{r}
+train_ml <- train %>%
+  mutate(
+    c_log_sqft_above    = log_sqft_above - mean(log_sqft_above),
+    c_log_sqft_basement = log_sqft_basement - mean(log_sqft_basement),
+    c_bathrooms         = bathrooms - mean(bathrooms),
+    c_bedrooms          = bedrooms - mean(bedrooms),
+    c_floors            = floors - mean(floors),
+    c_grade             = grade - mean(grade),
+    c_yr_built          = yr_built - mean(yr_built)
+  )
+
+```
+
+## Fully Pooled
+
+```{r}
+formula_pooled <- bf(
+  log_price ~
+    c_log_sqft_above +
+    c_log_sqft_basement +
+    c_bathrooms +
+    c_bedrooms +
+    c_floors +
+    c_grade +
+    c_yr_built
+)
+
+```
+
+```{r}
+priors_pooled <- c(
+  prior(normal(5, 3), class = "Intercept"),
+  prior(normal(0, 1), class = "b"),
+  prior(exponential(1), class = "sigma")
+)
+
+```
+
+```{r}
+fit_pooled <- brm(
+  formula = formula_pooled,
+  data = train_ml,
+  prior = priors_pooled,
+  sample_prior = "yes",
+  family = gaussian(),
+  chains = 4,
+  cores = 8,
+  iter = 4000,
+  warmup = 2000,
+  seed = 123,
+  control = list(adapt_delta = 0.95)
+)
+
+```
+
+## MULTILEVEL MODELING (VARYING INTERCEPT AND NOT SLOPE)
+
+```{r}
+library(brms)
+formula_m1 <- bf(
+  log_price ~
+    c_log_sqft_above +
+    c_log_sqft_basement +
+    c_bathrooms +
+    c_bedrooms +
+    c_floors +
+    c_grade +
+    c_yr_built +
+    (1 | zipcode)
+)
+```
+
+```{r}
+priors_m1 <- c(
+  prior(normal(5, 3), class = "Intercept"),
+  prior(normal(0, 1), class = "b"),
+  prior(exponential(1), class = "sd"),
+  prior(exponential(1), class = "sigma")
+)
+```
+
+```{r}
+fit_m1<- brm(
+  formula = formula_m1,
+  data = train_ml,
+  prior = priors_m1  ,
+  family = gaussian(),
+  sample_prior = "yes",
+  chains = 4,
+  cores = 8,
+  iter = 4000,
+  warmup = 2000,
+  seed = 123,
+  control = list(adapt_delta = 0.95),
+  refresh = 100
+)
+```
+
+## MULTILEVEL MODELING with VARYING INTERCEPT AND SLOPE)
+
+```{r}
+formula_varying_slopes <- bf(
+  log_price ~
+    c_log_sqft_above +
+    c_log_sqft_basement +
+    c_bathrooms +
+    c_bedrooms +
+    c_floors +
+    c_grade +
+    c_yr_built +
+    (1 + c_log_sqft_above + c_log_sqft_basement | zipcode)
+)
+
+priors_vs <- c(
+  prior(normal(5,3), class = "Intercept"),
+
+  # Fixed effects (elasticities / semi-elasticities)
+  prior(normal(0.25, 0.1), class = "b", coef = "c_log_sqft_above"),
+  prior(normal(0.10, 0.1), class = "b", coef = "c_log_sqft_basement"),
+  prior(normal(0.05, 0.05), class = "b", coef = "c_bathrooms"),
+  prior(normal(-0.02, 0.05), class = "b", coef = "c_bedrooms"),
+  prior(normal(0.05, 0.05), class = "b", coef = "c_floors"),
+  prior(normal(0.08, 0.05), class = "b", coef = "c_grade"),
+  prior(normal(0.01, 0.01), class = "b", coef = "c_yr_built"),
+
+  # Group-level (zipcode) standard deviations
+  prior(exponential(1), class = "sd", group = "zipcode"),
+
+  # Correlation between varying intercepts and slopes
+  prior(lkj(2), class = "cor"),
+
+  # Residual standard deviation
+  prior(exponential(1), class = "sigma")
+)
+
+```
+
+```{r}
+fit_varying_slopes<- brm(
+  formula = formula_varying_slopes,
+  data = train_ml,
+  prior = priors_vs,
+  sample_prior = "yes",
+  chains = 4,
+  cores = 8,
+  iter = 4000,
+  warmup = 2000,
+  seed = 123,
+  control = list(adapt_delta = 0.95)
+)
+
+```
+
+```{r}
+get_prior(
+  formula = formula_varying_slopes,
+  data    = train_ml,
+  family  = gaussian()
+)
+
+```
+
+```{r}
+summary(fit_pooled)
+```
+
+```{r}
+summary(fit_m1)
+```
+
+```{r}
+summary(fit_varying_slopes)
+```
+
+```{r}
+library(brms)
+pp_check(fit_pooled)
+```
+
+```{r}
+pp_check(fit_m1)
+```
+
+```{r}
+pp_check(fit_varying_slopes)
+
+```
+
+```{r}
+#RESIDUAL PLOTS
+library(dplyr)
+library(ggplot2)
+library(brms)
+library(bayesplot)
+
+
+train_ml <- train_ml %>%
+  mutate(
+    y_pooled = fitted(fit_pooled, summary = TRUE)[, "Estimate"],
+    y_m1     = fitted(fit_m1, summary = TRUE)[, "Estimate"],
+    y_vs     = fitted(fit_varying_slopes, summary = TRUE)[, "Estimate"],
+    res_pooled = log_price - y_pooled,
+    res_m1     = log_price - y_m1,
+    res_vs     = log_price - y_vs
+  )
+
+ggplot(train_ml, aes(y_pooled, res_pooled)) +
+  geom_point(alpha = 0.3, color = "green")+
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "Fully pooled", x = "Fitted", y = "Residual")
+
+ggplot(train_ml, aes(y_m1, res_m1)) +
+  geom_point(alpha = 0.3, color = "green")+
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "Varying intercept", x = "Fitted", y = "Residual")
+
+ggplot(train_ml, aes(y_vs, res_vs)) +
+  geom_point(alpha = 0.3, color ="green") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "Varying intercept + slopes", x = "Fitted", y = "Residual")
+
+ggplot(train_ml, aes(c_log_sqft_above, res_vs)) +
+  geom_point(alpha = 0.3, color="blue") +
+  geom_smooth(se = FALSE) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "Varying slopes: residuals vs log_sqft_above")
+
+ggplot(train_ml, aes(factor(zipcode), res_vs)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  coord_flip() +
+  labs(title = "Varying slopes: residuals by zipcode")
+
+pp_check(fit_varying_slopes, type = "scatter_avg")
+
+```
+
+```{r}
+library(bayesplot)
+
+color_scheme_set("brightblue")
+
+mcmc_trace(
+  as.array(fit_pooled),
+  facet_args = list(ncol = 1, strip.position = "left"),
+  size = 0.6
+) +
+  theme_bw(base_size = 14) +
+  theme(
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 10),
+    strip.text.y = element_text(size = 12)
+  )
+
+mcmc_trace(
+  as.array(fit_m1),
+  facet_args = list(ncol = 1, strip.position = "left"),
+  size = 0.6
+) +
+  theme_bw(base_size = 14) +
+  theme(
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 10),
+    strip.text.y = element_text(size = 12)
+  )
+
+mcmc_trace(
+  as.array(fit_varying_slopes),
+  facet_args = list(ncol = 1, strip.position = "left"),
+  size = 0.6
+) +
+  theme_bw(base_size = 14) +
+  theme(
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 10),
+    strip.text.y = element_text(size = 12)
+  )
+```
+
+```{r}
+# CREDIBLE INTERVALS
+library(bayesplot)
+
+pars_use <- c(
+  "b_Intercept",
+  "b_c_log_sqft_above",
+  "b_c_log_sqft_basement",
+  "b_c_bathrooms",
+  "b_c_bedrooms"
+)
+
+p1 <- mcmc_intervals(
+  as.array(fit_pooled),
+  pars = pars_use,
+  prob = 0.8,
+  prob_outer = 0.95
+) + ggtitle("Fully pooled")
+
+p2 <- mcmc_intervals(
+  as.array(fit_m1),
+  pars = pars_use,
+  prob = 0.8,
+  prob_outer = 0.95
+) + ggtitle("Varying intercept")
+
+p3 <- mcmc_intervals(
+  as.array(fit_varying_slopes),
+  pars = pars_use,
+  prob = 0.8,
+  prob_outer = 0.95
+) + ggtitle("Varying intercept + slopes")
+
+p1
+p2
+p3
+
+
+```
+
+```{r}
+library(bayesplot)
+library(dplyr)
+library(ggplot2)
+library(brms)
+library(bayesplot)
+color_scheme_set("mix-blue-pink")
+
+mcmc_trace(
+  as.array(fit_pooled),
+  pars = c(
+  "b_Intercept"
+  )
+) +
+  theme_bw(base_size = 14) +
+  theme(
+    strip.text = element_text(size = 12),
+    axis.text.x = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    panel.spacing = unit(1.2, "lines")
+  )
+
+```
+
+```{r}
+#CONDITIONAL EFFECTS - POOLED
+ce_pooled <- conditional_effects(
+  fit_pooled,
+  effects = "c_log_sqft_above",
+  re_formula = NA   # ignore group effects (none here anyway)
+)
+
+plot(
+  ce_pooled,
+  plot = FALSE
+)[[1]] +
+  theme_bw(base_size = 14) +
+  labs(
+    title = "Fully pooled model",
+    x = "Centered log sqft above",
+    y = "Expected log(price)"
+  )
+
+```
+
+```{r}
+ce_m1 <- conditional_effects(
+  fit_m1,
+  effects = "c_log_sqft_above",
+  re_formula = NA   # average over zipcodes
+)
+
+plot(
+  ce_m1,
+  plot = FALSE
+)[[1]] +
+  theme_bw(base_size = 14) +
+  labs(
+    title = "Varying intercepts by zipcode",
+    x = "Centered log sqft above",
+    y = "Expected log(price)"
+  )
+
+```
+
+```{r}
+ce_vs_pop <- conditional_effects(
+  fit_varying_slopes,
+  effects = "c_log_sqft_above",
+  re_formula = NA   # marginal over zipcodes
+)
+
+plot(
+  ce_vs_pop,
+  plot = FALSE
+)[[1]] +
+  theme_bw(base_size = 14) +
+  labs(
+    title = "Varying intercepts & slopes (population-level)",
+    x = "Centered log sqft above",
+    y = "Expected log(price)"
+  )
+
+```
+
+```{r}
+ce_vs_zip <- conditional_effects(
+  fit_varying_slopes,
+  effects = "c_log_sqft_above",
+  re_formula = NULL   # include group-level effects
+)
+
+plot(
+  ce_vs_zip,
+  plot = FALSE
+)[[1]] +
+  theme_bw(base_size = 14) +
+  labs(
+    title = "Zipcode-specific conditional effects",
+    x = "Centered log sqft above",
+    y = "Expected log(price)"
+  )
+
+```
+
+```{r}
+install.packages("patchwork")
+library(patchwork)
+
+p1 <- plot(ce_pooled, plot = FALSE)[[1]] + ggtitle("Fully pooled")
+p2 <- plot(ce_m1, plot = FALSE)[[1]] + ggtitle("Varying intercepts")
+p3 <- plot(ce_vs_pop, plot = FALSE)[[1]] + ggtitle("Varying intercepts & slopes")
+
+(p1 | p2 | p3) +
+  plot_annotation(
+    title = "Conditional effects of log sqft above across models"
+  )
+
+```
+
+```{r}
+df_pooled <- ce_pooled[[1]]
+df_m1     <- ce_m1[[1]]
+df_vs     <- ce_vs_pop[[1]]
+
+# Global axis limits across all three models
+x_lim <- range(
+  df_pooled$c_log_sqft_above,
+  df_m1$c_log_sqft_above,
+  df_vs$c_log_sqft_above
+)
+sedfy_lim <- range
+
+```
+
+```         
+```
+
+mcmc_hist(posterior_samples(fit_pooled))
+
+```{r}
+
+mcmc_hist(posterior_samples(fit_pooled)) + 
+  ggtitle("Posterior Distributions for Pooled Model") +
+  theme_minimal()
+
+```
+
+```{r}
+library(bayesplot)
+library(dplyr)
+library(ggplot2)
+library(brms)
+library(bayesplot)
+```
+
+```{r}
+names(posterior_samples(fit_varying_slopes))
+```
+
+```{r}
+mcmc_hist(posterior_samples(fit_m1), pars = c(
+  "b_Intercept",                
+  "b_c_log_sqft_above",
+  "b_c_log_sqft_basement",
+  "b_c_bathrooms",
+  "b_c_bedrooms",
+  "b_c_floors",
+  "b_c_grade",
+  "b_c_yr_built",
+  # "sd_zipcode__Intercept",
+  # "sd_zipcode__c_log_sqft_above",
+  # "sd_zipcode__c_log_sqft_basement",
+  # "cor_zipcode__Intercept__c_log_sqft_above",
+  # "cor_zipcode__Intercept__c_log_sqft_basement",
+  # "cor_zipcode__c_log_sqft_above__c_log_sqft_basement",
+  "sigma",
+  "Intercept")) + 
+  ggtitle("Posterior Distributions for intercept model") +
+  theme_minimal()
+
+```
+
+```{r}
+summary(fit_varying_slopes)
+```
