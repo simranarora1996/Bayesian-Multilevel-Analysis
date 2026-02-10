@@ -1,0 +1,7 @@
+.RData
+.Rhistory
+*.rds
+*.html
+figure-html/
+*_files/
+
